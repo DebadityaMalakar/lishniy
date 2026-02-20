@@ -5,6 +5,7 @@ import { useParams, useRouter } from 'next/navigation';
 import { supabase } from '@/utils/supabase';
 import SearchBar from '@/components/SearchBar';
 import Footer from '@/components/Footer';
+import { CACHE_KEYS, getCache, setCache, TTL } from '@/utils/cache';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 interface Entry {
@@ -303,21 +304,38 @@ export default function EntryPage() {
 
   const cardRef = useRef<HTMLDivElement>(null!);
 
+  // In EntryPage component, modify the data fetching:
+
   useEffect(() => {
     if (!id) return;
-    supabase
-      .from('entries')
-      .select('id, word, description, tags, language, tone, rarity_level, created_at')
-      .eq('id', id)
-      .single()
-      .then(({ data, error }) => {
-        if (error || !data) {
+
+    const fetchEntry = async () => {
+      // Try cache first
+      const cached = getCache<Entry>(CACHE_KEYS.ENTRY(id), TTL.ENTRY_DETAIL);
+      if (cached) {
+        setEntry(cached);
+        setStatus('done');
+      }
+
+      // Fetch fresh in background
+      const { data, error } = await supabase
+        .from('entries')
+        .select('id, word, description, tags, language, tone, rarity_level, created_at')
+        .eq('id', id)
+        .single();
+
+      if (error || !data) {
+        if (!cached) {
           setStatus(error?.code === 'PGRST116' ? 'not_found' : 'error');
-        } else {
-          setEntry(data);
-          setStatus('done');
         }
-      });
+      } else {
+        setEntry(data);
+        setCache(CACHE_KEYS.ENTRY(id), data);
+        setStatus('done');
+      }
+    };
+
+    fetchEntry();
   }, [id]);
 
   // ── Toast helper ──

@@ -3,6 +3,7 @@
 import { useState, useEffect } from 'react';
 import { supabase } from '@/utils/supabase';
 import Footer from '@/components/Footer';
+import { getCache, CACHE_KEYS, TTL, setCache } from '@/utils/cache';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 interface VoteHistoryRow {
@@ -194,21 +195,36 @@ export default function VoteHistory() {
   const [filter, setFilter] = useState<FilterMode>('all');
 
   useEffect(() => {
-    supabase
-      .from('vote_history')
-      .select(`
-        id, entry_id, total_votes, upvotes, downvotes, final_score,
-        started_at, ended_at, archived_at,
-        entry:entries ( id, word, description, tone, rarity_level )
-      `)
-      .order('ended_at', { ascending: false })
-      .then(({ data, error }) => {
-        if (error) { setStatus('error'); return; }
-        setRows((data ?? []) as unknown as VoteHistoryRow[]);
+    const fetchHistory = async () => {
+      // Try cache first
+      const cached = getCache<VoteHistoryRow[]>(CACHE_KEYS.VOTE_HISTORY, TTL.VOTE_HISTORY);
+      if (cached) {
+        setRows(cached);
         setStatus('done');
-      });
-  }, []);
+      }
 
+      // Fetch fresh
+      const { data, error } = await supabase
+        .from('vote_history')
+        .select(`
+          id, entry_id, total_votes, upvotes, downvotes, final_score,
+          started_at, ended_at, archived_at,
+          entry:entries ( id, word, description, tone, rarity_level )
+        `)
+        .order('ended_at', { ascending: false });
+
+      if (error) {
+        if (!cached) setStatus('error');
+      } else {
+        const rows = (data ?? []) as unknown as VoteHistoryRow[];
+        setRows(rows);
+        setCache(CACHE_KEYS.VOTE_HISTORY, rows);
+        setStatus('done');
+      }
+    };
+
+    fetchHistory();
+  }, []);
   const processed = applySort(applyFilter(rows, filter), sort);
 
   // aggregate stats

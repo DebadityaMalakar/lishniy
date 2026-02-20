@@ -3,6 +3,7 @@
 import Footer from '@/components/Footer';
 import { useState, useEffect } from 'react';
 import { supabase } from '@/utils/supabase';
+import { CACHE_KEYS, getCache, setCache, TTL } from '@/utils/cache';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 interface Entry {
@@ -132,21 +133,25 @@ export default function Index() {
   const [surpriseLoading, setSurpriseLoading] = useState(false);
 
   // Fetch total count + 6 random featured entries on mount
-  useEffect(() => {
-    // Total count
-    supabase
-      .from('entries')
-      .select('*', { count: 'exact', head: true })
-      .then(({ count }) => { if (count !== null) setTotal(count); });
+// In your home page component, modify the featured entries fetch:
 
-    // Featured entries: grab a small random sample
+  useEffect(() => {
+    // Try cache first
+    const cached = getCache<Entry[]>(CACHE_KEYS.ENTRIES_ALL, TTL.ENTRIES_LIST);
+    if (cached) {
+      const shuffled = [...cached].sort(() => Math.random() - 0.5);
+      setEntries(shuffled);
+      setLoadingEntry(false);
+    }
+
+    // Always fetch fresh in background
     supabase
       .from('entries')
       .select('id, word, description, tone')
       .limit(6)
       .then(({ data }) => {
         if (data && data.length > 0) {
-          // shuffle so it feels random each visit
+          setCache(CACHE_KEYS.ENTRIES_ALL, data);
           const shuffled = [...data].sort(() => Math.random() - 0.5);
           setEntries(shuffled);
         }
