@@ -1,8 +1,8 @@
 'use client';
 
 import { useState, useEffect, useCallback } from 'react';
-import { supabase } from '@/utils/supabase';
 import Footer from '@/components/Footer';
+import { CACHE_KEYS, getCache, setCache, TTL } from '@/utils/cache';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 interface Entry {
@@ -28,8 +28,70 @@ interface VoteCounts {
   down: number;
 }
 
-type PageStatus = 'loading' | 'active' | 'no_vote' | 'error';
+type PageStatus = 'loading' | 'active' | 'ended' | 'no_vote' | 'error';
 type VoteStatus = 'idle' | 'submitting' | 'voted';
+
+// ─── API Client ───────────────────────────────────────────────────────────────
+const api = {
+  async getActiveVote() {
+    // Fetch the current active vote (only where is_active = true)
+    const voteRes = await fetch('/api/supabase/route?table=current_vote&select=id,entry_id,started_at,ends_at,is_active&is_active=true&orderBy=started_at&orderDirection=desc&limit=1');
+    if (!voteRes.ok) {
+      const error = await voteRes.json();
+      throw new Error(error.error || 'Failed to fetch active vote');
+    }
+    const { data: voteData } = await voteRes.json();
+    
+    if (!voteData || voteData.length === 0) return null;
+    
+    const vote = voteData[0];
+    
+    // Check if the session has ended (if ends_at is in the past)
+    if (vote.ends_at && new Date(vote.ends_at) < new Date()) {
+      return { ...vote, is_active: false, has_ended: true };
+    }
+    
+    // Fetch the associated entry
+    const entryRes = await fetch(`/api/supabase/route?table=entries&select=id,word,description,tone,rarity_level,tags&id=${vote.entry_id}`);
+    if (!entryRes.ok) {
+      const error = await entryRes.json();
+      throw new Error(error.error || 'Failed to fetch entry');
+    }
+    const { data: entryData } = await entryRes.json();
+    
+    return {
+      ...vote,
+      entry: entryData[0]
+    };
+  },
+
+  async getVoteCounts(sessionId: string) {
+    const res = await fetch(`/api/supabase/route?table=votes&select=vote_value&filter_vote_session_id__eq=${sessionId}`);
+    if (!res.ok) {
+      const error = await res.json();
+      throw new Error(error.error || 'Failed to fetch vote counts');
+    }
+    const { data } = await res.json();
+    return data;
+  },
+
+  async submitVote(sessionId: string, value: number) {
+    const res = await fetch('/api/supabase/route?table=votes', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        action: 'insert',
+        data: { vote_session_id: sessionId, vote_value: value }
+      })
+    });
+    if (!res.ok) {
+      const error = await res.json();
+      throw new Error(error.error || 'Failed to submit vote');
+    }
+    const { data } = await res.json();
+    return data;
+  }
+};
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 const VOTED_KEY = (sessionId: string) => `lishniy_voted_${sessionId}`;
@@ -45,36 +107,47 @@ function storeVote(sessionId: string, value: number) {
   try { localStorage.setItem(VOTED_KEY(sessionId), String(value)); } catch {}
 }
 
-function useCountdown(endsAt: string | null) {
+function useCountdown(endsAt: string | null, onEnd?: () => void) {
   const [remaining, setRemaining] = useState<string | null>(null);
+  const [hasEnded, setHasEnded] = useState(false);
 
   useEffect(() => {
     if (!endsAt) return;
-    const tick = () => {
-      const diff = new Date(endsAt).getTime() - Date.now();
-      if (diff <= 0) { setRemaining('Ended'); return; }
+    
+    const checkEnd = () => {
+      const now = Date.now();
+      const endTime = new Date(endsAt).getTime();
+      const diff = endTime - now;
+      
+      if (diff <= 0) { 
+        setRemaining('Ended');
+        if (!hasEnded) {
+          setHasEnded(true);
+          onEnd?.();
+        }
+        return;
+      }
+      
       const h = Math.floor(diff / 3600000);
       const m = Math.floor((diff % 3600000) / 60000);
       const s = Math.floor((diff % 60000) / 1000);
       setRemaining(h > 0 ? `${h}h ${m}m ${s}s` : `${m}m ${s}s`);
     };
-    tick();
-    const id = setInterval(tick, 1000);
+    
+    checkEnd();
+    const id = setInterval(checkEnd, 1000);
     return () => clearInterval(id);
-  }, [endsAt]);
+  }, [endsAt, onEnd, hasEnded]);
 
-  return remaining;
+  return { remaining, hasEnded };
 }
 
 // ─── Sub-components ───────────────────────────────────────────────────────────
 function RarityPips({ level }: { level: number }) {
   return (
-    <div style={{ display: 'flex', gap: 3 }}>
+    <div className="pips-container">
       {Array.from({ length: 10 }).map((_, i) => (
-        <div key={i} style={{
-          width: 7, height: 7, borderRadius: 1,
-          background: i < level ? 'var(--color-gold-03)' : 'var(--color-white-04)',
-        }} />
+        <div key={i} className={`pip ${i < level ? 'filled' : ''}`} style={{ width: 7, height: 7 }} />
       ))}
     </div>
   );
@@ -86,27 +159,29 @@ function VoteBar({ up, down, userVote }: { up: number; down: number; userVote: n
   const downPct = 100 - upPct;
 
   return (
-    <div>
-      {/* bar */}
-      <div style={{ display: 'flex', height: 12, borderRadius: 2, overflow: 'hidden', border: '2px solid var(--color-white-04)' }}>
-        <div style={{
-          width: `${upPct}%`,
-          background: userVote === 1 ? 'var(--color-emerald-02)' : 'var(--color-emerald-07)',
-          transition: 'width 0.5s ease',
-        }} />
-        <div style={{
-          width: `${downPct}%`,
-          background: userVote === -1 ? 'var(--color-red-02)' : 'var(--color-red-03)',
-          opacity: userVote === -1 ? 1 : 0.5,
-          transition: 'width 0.5s ease',
-        }} />
+    <div className="vote-bar">
+      <div className="vote-bar-track">
+        <div 
+          className="vote-bar-fill vote-bar-up"
+          style={{ 
+            width: `${upPct}%`,
+            background: userVote === 1 ? 'var(--color-emerald-02)' : 'var(--color-emerald-07)'
+          }} 
+        />
+        <div 
+          className="vote-bar-fill vote-bar-down"
+          style={{ 
+            width: `${downPct}%`,
+            background: userVote === -1 ? 'var(--color-red-02)' : 'var(--color-red-03)',
+            opacity: userVote === -1 ? 1 : 0.5
+          }} 
+        />
       </div>
-      {/* labels */}
-      <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: '0.4rem' }}>
-        <span style={{ fontFamily: '"Courier New", monospace', fontSize: '0.62rem', color: 'var(--color-emerald-03)', letterSpacing: '0.1em' }}>
+      <div className="vote-bar-labels">
+        <span className="vote-label-up">
           ▲ {up} ({upPct}%)
         </span>
-        <span style={{ fontFamily: '"Courier New", monospace', fontSize: '0.62rem', color: 'var(--color-red-02)', letterSpacing: '0.1em' }}>
+        <span className="vote-label-down">
           {downPct}% ({down}) ▼
         </span>
       </div>
@@ -124,53 +199,35 @@ function VoteButton({
   loading: boolean;
 }) {
   const isUp = direction === 'up';
-  const activeColor = isUp ? 'var(--color-emerald-02)' : 'var(--color-red-02)';
-  const activeBorder = isUp ? 'var(--color-emerald-03)' : 'var(--color-red-03)';
-  const activeShadow = isUp ? 'var(--color-emerald-05)' : 'var(--color-red-01)';
-  const idleColor = 'var(--color-purple-04)';
+  const activeClass = isUp ? 'vote-btn-up-active' : 'vote-btn-down-active';
+  const idleClass = 'vote-btn-idle';
 
   return (
     <button
       onClick={onClick}
       disabled={disabled || loading}
-      style={{
-        flex: 1,
-        fontFamily: '"Courier New", monospace',
-        fontWeight: 900,
-        fontSize: '1rem',
-        letterSpacing: '0.1em',
-        textTransform: 'uppercase',
-        cursor: disabled ? 'not-allowed' : 'pointer',
-        border: `3px solid ${active ? activeBorder : 'var(--color-white-04)'}`,
-        borderRadius: 2,
-        padding: '1.1rem',
-        background: active ? activeColor : 'white',
-        color: active ? 'white' : idleColor,
-        boxShadow: active ? `5px 5px 0 ${activeShadow}` : '4px 4px 0 var(--color-white-04)',
-        transition: 'all 0.15s ease',
-        opacity: disabled && !active ? 0.45 : 1,
-        display: 'flex',
-        flexDirection: 'column',
-        alignItems: 'center',
-        gap: '0.25rem',
-      }}
+      className={`vote-btn ${active ? activeClass : idleClass} ${loading ? 'vote-btn-loading' : ''}`}
       onMouseEnter={e => {
         if (!disabled && !loading) {
           (e.currentTarget as HTMLElement).style.transform = 'translate(-2px,-2px)';
           (e.currentTarget as HTMLElement).style.boxShadow = active
-            ? `7px 7px 0 ${activeShadow}`
+            ? isUp 
+              ? '7px 7px 0 var(--color-emerald-05)'
+              : '7px 7px 0 var(--color-red-01)'
             : '6px 6px 0 var(--color-white-04)';
         }
       }}
       onMouseLeave={e => {
         (e.currentTarget as HTMLElement).style.transform = 'translate(0,0)';
         (e.currentTarget as HTMLElement).style.boxShadow = active
-          ? `5px 5px 0 ${activeShadow}`
+          ? isUp
+            ? '5px 5px 0 var(--color-emerald-05)'
+            : '5px 5px 0 var(--color-red-01)'
           : '4px 4px 0 var(--color-white-04)';
       }}
     >
-      <span style={{ fontSize: '1.6rem', lineHeight: 1 }}>{isUp ? '▲' : '▼'}</span>
-      <span style={{ fontSize: '0.65rem', letterSpacing: '0.2em' }}>
+      <span className="vote-btn-icon">{isUp ? '▲' : '▼'}</span>
+      <span className="vote-btn-label">
         {loading ? '…' : isUp ? 'YES' : 'NAH'}
       </span>
     </button>
@@ -178,19 +235,16 @@ function VoteButton({
 }
 
 function Skeleton() {
-  const bar = (w: string, h = 12, delay = '0s') => (
-    <div style={{ width: w, height: h, background: 'var(--color-white-04)', borderRadius: 2, animation: `shimmer 1.4s ease ${delay} infinite alternate` }} />
-  );
   return (
-    <div style={{ background: 'white', border: '3px solid var(--color-white-04)', borderRadius: 2, padding: '2rem 2.25rem', boxShadow: '6px 6px 0 var(--color-white-04)', display: 'flex', flexDirection: 'column', gap: '1rem' }}>
-      {bar('45%', 52, '0s')}
-      <div style={{ height: 2, background: 'var(--color-white-04)' }} />
-      {bar('100%', 12, '0.1s')}
-      {bar('88%', 12, '0.2s')}
-      {bar('70%', 12, '0.3s')}
-      <div style={{ display: 'flex', gap: '0.75rem', marginTop: '0.5rem' }}>
-        {bar('50%', 72, '0.1s')}
-        {bar('50%', 72, '0.2s')}
+    <div className="skeleton-vote-card">
+      <div className="skeleton-vote-word" />
+      <div className="divider-white" />
+      <div className="skeleton-line" />
+      <div className="skeleton-line short" />
+      <div className="skeleton-line shorter" />
+      <div className="skeleton-vote-buttons">
+        <div className="skeleton-vote-btn" />
+        <div className="skeleton-vote-btn" />
       </div>
     </div>
   );
@@ -205,7 +259,17 @@ export default function VoteNow() {
   const [userVote,   setUserVote]   = useState<number | null>(null);
   const [toast,      setToast]      = useState({ visible: false, message: '' });
 
-  const countdown = useCountdown(session?.ends_at ?? null);
+  const handleSessionEnd = useCallback(() => {
+    if (session) {
+      setPageStatus('ended');
+      showToast('Voting session has ended ▲');
+    }
+  }, [session]);
+
+  const { remaining, hasEnded } = useCountdown(
+    session?.ends_at ?? null, 
+    handleSessionEnd
+  );
 
   const showToast = (message: string) => {
     setToast({ visible: true, message });
@@ -214,168 +278,155 @@ export default function VoteNow() {
 
   // Fetch vote counts for a session
   const fetchCounts = useCallback(async (sessionId: string) => {
-    const { data } = await supabase
-      .from('votes')
-      .select('vote_value')
-      .eq('vote_session_id', sessionId);
-
-    if (data) {
+    try {
+      const data = await api.getVoteCounts(sessionId);
       setCounts({
-        up:   data.filter(v => v.vote_value === 1).length,
-        down: data.filter(v => v.vote_value === -1).length,
+        up: data.filter((v: any) => v.vote_value === 1).length,
+        down: data.filter((v: any) => v.vote_value === -1).length,
       });
+    } catch (error) {
+      console.error('Failed to fetch vote counts:', error);
     }
   }, []);
 
   // Load active session + entry
   useEffect(() => {
-    supabase
-      .from('current_vote')
-      .select(`
-        id, entry_id, started_at, ends_at, is_active,
-        entry:entries ( id, word, description, tone, rarity_level, tags )
-      `)
-      .eq('is_active', true)
-      .order('started_at', { ascending: false })
-      .limit(1)
-      .single()
-      .then(({ data, error }) => {
-        if (error || !data) {
-          setPageStatus(error?.code === 'PGRST116' ? 'no_vote' : 'error');
+    let isMounted = true;
+
+    const loadActiveVote = async () => {
+      try {
+        // Try cache first
+        const cached = getCache<any>(CACHE_KEYS.ACTIVE_VOTE, TTL.ACTIVE_VOTE);
+        if (cached && isMounted) {
+          // Check if cached session is still active and not ended
+          if (cached.is_active && (!cached.ends_at || new Date(cached.ends_at) > new Date())) {
+            setSession(cached);
+            setPageStatus('active');
+            
+            const stored = getStoredVote(cached.id);
+            if (stored !== null) {
+              setUserVote(stored);
+              setVoteStatus('voted');
+            }
+            
+            fetchCounts(cached.id);
+          }
+        }
+
+        // Fetch fresh data
+        const data = await api.getActiveVote();
+        
+        if (!isMounted) return;
+
+        if (!data) {
+          setPageStatus('no_vote');
           return;
         }
 
-        const s = data as unknown as VoteSession;
-        setSession(s);
+        // Check if the session has ended (either by is_active=false or ends_at passed)
+        if (!data.is_active || data.has_ended) {
+          setPageStatus('ended');
+          return;
+        }
+
+        setSession(data);
+        setCache(CACHE_KEYS.ACTIVE_VOTE, data);
         setPageStatus('active');
 
         // Check if already voted this session
-        const stored = getStoredVote(s.id);
+        const stored = getStoredVote(data.id);
         if (stored !== null) {
           setUserVote(stored);
           setVoteStatus('voted');
         }
 
-        fetchCounts(s.id);
-      });
+        fetchCounts(data.id);
+      } catch (error) {
+        console.error('Failed to load active vote:', error);
+        if (isMounted) setPageStatus('error');
+      }
+    };
+
+    loadActiveVote();
+
+    return () => {
+      isMounted = false;
+    };
   }, [fetchCounts]);
 
-  // Realtime subscription for live vote updates
+  // Polling for live vote updates (only if session is active)
   useEffect(() => {
-    if (!session) return;
-    const channel = supabase
-      .channel(`votes:${session.id}`)
-      .on('postgres_changes', {
-        event: 'INSERT',
-        schema: 'public',
-        table: 'votes',
-        filter: `vote_session_id=eq.${session.id}`,
-      }, () => fetchCounts(session.id))
-      .subscribe();
+    if (!session || pageStatus !== 'active' || voteStatus !== 'idle') return;
 
-    return () => { supabase.removeChannel(channel); };
-  }, [session, fetchCounts]);
+    const interval = setInterval(() => {
+      fetchCounts(session.id);
+    }, 3000);
+
+    return () => clearInterval(interval);
+  }, [session, fetchCounts, voteStatus, pageStatus]);
 
   const handleVote = async (value: 1 | -1) => {
-    if (!session || voteStatus !== 'idle') return;
-    setVoteStatus('submitting');
-
-    const { error } = await supabase
-      .from('votes')
-      .insert({ vote_session_id: session.id, vote_value: value });
-
-    if (error) {
-      showToast('Vote failed — try again ▲');
-      setVoteStatus('idle');
+    // Don't allow voting if session is not active
+    if (!session || pageStatus !== 'active' || voteStatus !== 'idle') {
+      showToast('Voting is not available at this time ▲');
       return;
     }
 
-    storeVote(session.id, value);
-    setUserVote(value);
-    setVoteStatus('voted');
-    fetchCounts(session.id);
-    showToast(value === 1 ? 'Voted ▲ — word approved!' : 'Voted ▼ — duly noted.');
+    // Double-check if session is still active
+    if (!session.is_active || (session.ends_at && new Date(session.ends_at) < new Date())) {
+      setPageStatus('ended');
+      showToast('Voting session has ended ▲');
+      return;
+    }
+
+    setVoteStatus('submitting');
+
+    try {
+      await api.submitVote(session.id, value);
+
+      storeVote(session.id, value);
+      setUserVote(value);
+      setVoteStatus('voted');
+      fetchCounts(session.id);
+      showToast(value === 1 ? 'Voted ▲ — word approved!' : 'Voted ▼ — duly noted.');
+    } catch (error) {
+      console.error('Vote failed:', error);
+      showToast('Vote failed — try again ▲');
+      setVoteStatus('idle');
+    }
   };
 
   const total = counts.up + counts.down;
 
   return (
     <>
-      <style>{`
-        @keyframes shimmer { from { opacity: 0.5; } to { opacity: 1; } }
-        @keyframes pop-in {
-          from { opacity: 0; transform: translateY(14px) scale(0.97); }
-          to   { opacity: 1; transform: translateY(0)    scale(1);    }
-        }
-        @keyframes pulse-ring {
-          0%   { box-shadow: 0 0 0 0 rgba(109,6,177,0.25); }
-          70%  { box-shadow: 0 0 0 12px rgba(109,6,177,0); }
-          100% { box-shadow: 0 0 0 0 rgba(109,6,177,0);    }
-        }
-        .vote-card { animation: pop-in 0.5s cubic-bezier(0.22,1,0.36,1) both; }
-        .live-dot {
-          width: 8px; height: 8px; border-radius: 50%;
-          background: var(--color-emerald-02);
-          animation: pulse-ring 1.8s ease infinite;
-          display: inline-block;
-        }
-      `}</style>
+      <div className="page-wrapper vote-page-wrapper">
+        <div className="bg-dot-grid" />
 
-      <div style={{
-        minHeight: '100vh',
-        background: 'linear-gradient(145deg, var(--color-white-06) 0%, var(--color-white-02) 45%, var(--color-white-05) 100%)',
-        fontFamily: '"Courier New", monospace',
-        display: 'flex',
-        flexDirection: 'column',
-      }}>
-
-        {/* dot grid */}
-        <div style={{
-          position: 'fixed', inset: 0, pointerEvents: 'none', zIndex: 0,
-          backgroundImage: 'radial-gradient(circle, rgba(109,6,177,0.09) 1px, transparent 1px)',
-          backgroundSize: '28px 28px',
-        }} />
-
-        <div style={{ position: 'relative', zIndex: 1, maxWidth: 680, width: '100%', margin: '0 auto', padding: '2.5rem 2rem', flex: 1 }}>
-
-          {/* ── HEADER ── */}
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '2.5rem', flexWrap: 'wrap', gap: '1rem' }}>
+        <div className="vote-container">
+          <div className="vote-header">
             <div>
-              <a href="/" style={{ textDecoration: 'none' }}>
-                <span style={{ fontFamily: '"Courier New", monospace', fontWeight: 900, fontSize: '1rem', color: 'var(--color-purple-01)', letterSpacing: '-0.02em', display: 'inline-block', marginBottom: '0.5rem' }}>
-                  ← LISHNIY
-                </span>
+              <a href="/" className="back-link">
+                ← LISHNIY
               </a>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem' }}>
-                <h1 style={{ fontSize: 'clamp(1.6rem, 5vw, 2.4rem)', fontWeight: 900, color: 'var(--color-purple-01)', textTransform: 'uppercase', letterSpacing: '-0.03em', textShadow: '3px 3px 0 var(--color-white-04)', margin: 0 }}>
+              <div className="vote-title-container">
+                <h1 className="vote-title">
                   VOTE
                 </h1>
                 {pageStatus === 'active' && <span className="live-dot" />}
               </div>
-              <p style={{ fontFamily: 'Georgia, serif', fontStyle: 'italic', fontSize: '0.82rem', color: 'var(--color-gray-01)', margin: '0.25rem 0 0' }}>
-                Should this word make the cut?
+              <p className="vote-subtitle">
+                {pageStatus === 'active' 
+                  ? 'Should this word make the cut?' 
+                  : pageStatus === 'ended'
+                  ? 'This voting session has ended'
+                  : 'Check back for new words to vote on'}
               </p>
             </div>
 
-            {/* history button */}
             <button
               onClick={() => { window.location.href = '/vote/history'; }}
-              style={{
-                fontFamily: '"Courier New", monospace',
-                fontWeight: 700,
-                fontSize: '0.65rem',
-                letterSpacing: '0.18em',
-                textTransform: 'uppercase',
-                cursor: 'pointer',
-                border: '2px solid var(--color-purple-04)',
-                borderRadius: 2,
-                padding: '0.45rem 0.9rem',
-                background: 'white',
-                color: 'var(--color-purple-04)',
-                boxShadow: '3px 3px 0 var(--color-white-04)',
-                transition: 'transform 0.1s, box-shadow 0.1s',
-                alignSelf: 'flex-start',
-              }}
+              className="history-btn"
               onMouseEnter={e => {
                 (e.currentTarget as HTMLElement).style.transform = 'translate(-1px,-1px)';
                 (e.currentTarget as HTMLElement).style.boxShadow = '5px 5px 0 var(--color-purple-04)';
@@ -395,177 +446,134 @@ export default function VoteNow() {
             </button>
           </div>
 
-          {/* ── STATES ── */}
-
           {pageStatus === 'loading' && <Skeleton />}
 
           {pageStatus === 'no_vote' && (
-            <div style={{ textAlign: 'center', padding: '4rem 1rem' }}>
-              <div style={{ fontSize: '3rem', opacity: 0.2, marginBottom: '1rem', userSelect: 'none' }}>◇</div>
-              <p style={{ fontWeight: 700, fontSize: '0.85rem', color: 'var(--color-purple-04)', letterSpacing: '0.1em', textTransform: 'uppercase', marginBottom: '0.4rem' }}>
+            <div className="empty-state">
+              <div className="empty-state-icon">◇</div>
+              <p className="empty-state-title">
                 No active vote
               </p>
-              <p style={{ fontFamily: 'Georgia, serif', fontStyle: 'italic', fontSize: '0.8rem', color: 'var(--color-gray-01)', margin: 0 }}>
+              <p className="empty-state-description">
                 Nothing to vote on right now. Check back soon.
               </p>
             </div>
           )}
 
+          {pageStatus === 'ended' && (
+            <div className="empty-state">
+              <div className="empty-state-icon">◈</div>
+              <p className="empty-state-title">
+                Voting session ended
+              </p>
+              <p className="empty-state-description">
+                This voting period has concluded. Check the history to see the results.
+              </p>
+              <button
+                onClick={() => { window.location.href = '/vote/history'; }}
+                className="btn-primary btn-large"
+                style={{ marginTop: '1.5rem' }}
+              >
+                View Vote History
+              </button>
+            </div>
+          )}
+
           {pageStatus === 'error' && (
-            <div style={{ textAlign: 'center', padding: '4rem 1rem' }}>
-              <div style={{ fontSize: '3rem', opacity: 0.2, marginBottom: '1rem', userSelect: 'none' }}>▲</div>
-              <p style={{ fontWeight: 700, fontSize: '0.85rem', color: 'var(--color-red-01)', letterSpacing: '0.1em', textTransform: 'uppercase', marginBottom: '0.4rem' }}>
+            <div className="empty-state">
+              <div className="empty-state-icon error">▲</div>
+              <p className="empty-state-title error">
                 Failed to load
               </p>
-              <p style={{ fontFamily: 'Georgia, serif', fontStyle: 'italic', fontSize: '0.8rem', color: 'var(--color-gray-01)', margin: 0 }}>
-                Supabase returned an error. Check your connection.
+              <p className="empty-state-description">
+                Something went wrong. Check your connection.
               </p>
             </div>
           )}
 
           {pageStatus === 'active' && session && (
             <div className="vote-card">
-
-              {/* ── SESSION META ── */}
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem', flexWrap: 'wrap', gap: '0.5rem' }}>
-                <span style={{ fontSize: '0.58rem', letterSpacing: '0.2em', textTransform: 'uppercase', color: 'var(--color-purple-06)' }}>
+              <div className="vote-session-meta">
+                <span className="vote-session-label">
                   ► ACTIVE VOTE SESSION
                 </span>
-                <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center' }}>
-                  {countdown && (
-                    <span style={{ fontSize: '0.6rem', letterSpacing: '0.15em', color: 'var(--color-gold-04)', fontWeight: 700 }}>
-                      ⏱ {countdown}
+                <div className="vote-session-stats">
+                  {remaining && remaining !== 'Ended' && (
+                    <span className="vote-countdown">
+                      ⏱ {remaining}
                     </span>
                   )}
-                  <span style={{ fontSize: '0.6rem', letterSpacing: '0.12em', color: 'var(--color-gray-01)', textTransform: 'uppercase' }}>
+                  <span className="vote-total">
                     {total} vote{total !== 1 ? 's' : ''}
                   </span>
                 </div>
               </div>
 
-              {/* ── ENTRY CARD ── */}
-              <div style={{
-                background: 'white',
-                border: '3px solid var(--color-purple-01)',
-                borderRadius: 2,
-                padding: '2rem 2.25rem',
-                boxShadow: '6px 6px 0 var(--color-purple-04)',
-                position: 'relative',
-                marginBottom: '1.25rem',
-              }}>
-                {/* corner pips */}
-                <div style={{ position: 'absolute', top: -3, right: -3, width: 11, height: 11, background: 'var(--color-gold-03)' }} />
-                <div style={{ position: 'absolute', bottom: -3, left: -3, width: 11, height: 11, background: 'var(--color-gold-03)' }} />
+              <div className="vote-entry-card">
+                <div className="corner-gold-md" />
+                <div className="corner-gold-md-bottom" />
 
-                {/* word + tone */}
-                <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: '0.5rem', marginBottom: '0.3rem', flexWrap: 'wrap' }}>
-                  <h2 style={{
-                    fontFamily: '"Courier New", monospace',
-                    fontSize: 'clamp(2rem, 7vw, 3.5rem)',
-                    fontWeight: 900,
-                    color: 'var(--color-purple-01)',
-                    letterSpacing: '-0.04em',
-                    textTransform: 'lowercase',
-                    margin: 0,
-                    lineHeight: 1,
-                    textShadow: '3px 3px 0 var(--color-white-04)',
-                  }}>
+                <div className="vote-entry-header">
+                  <h2 className="vote-entry-word">
                     {session.entry.word}
                   </h2>
                   {session.entry.tone && (
-                    <span style={{
-                      fontFamily: '"Courier New", monospace',
-                      fontSize: '0.58rem', letterSpacing: '0.18em',
-                      textTransform: 'uppercase', padding: '0.2rem 0.55rem',
-                      border: '2px solid var(--color-purple-04)', borderRadius: 2,
-                      color: 'var(--color-purple-04)', background: 'var(--color-white-02)',
-                      marginTop: '0.4rem',
-                    }}>
+                    <span className="badge-tone vote-entry-tone">
                       {session.entry.tone}
                     </span>
                   )}
                 </div>
 
-                {/* divider */}
-                <div style={{ height: 2, background: 'linear-gradient(90deg, var(--color-purple-01), var(--color-white-02))', margin: '1rem 0 1.25rem', borderRadius: 1 }} />
+                <div className="divider-gradient vote-divider" />
 
-                {/* description */}
-                <p style={{
-                  fontFamily: 'Georgia, serif',
-                  fontSize: 'clamp(0.95rem, 2vw, 1.1rem)',
-                  color: 'var(--color-black-01)',
-                  lineHeight: 1.75, fontStyle: 'italic', margin: '0 0 1.25rem',
-                }}>
+                <p className="vote-entry-description">
                   "{session.entry.description}"
                 </p>
 
-                {/* rarity + tags */}
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '0.5rem' }}>
+                <div className="vote-entry-footer">
                   <RarityPips level={session.entry.rarity_level} />
                   {session.entry.tags?.length > 0 && (
-                    <div style={{ display: 'flex', gap: '0.3rem', flexWrap: 'wrap' }}>
+                    <div className="tags-container">
                       {session.entry.tags.map(tag => (
-                        <span key={tag} style={{
-                          fontFamily: '"Courier New", monospace', fontSize: '0.55rem',
-                          letterSpacing: '0.1em', padding: '0.1rem 0.4rem',
-                          background: 'var(--color-white-01)', border: '1px solid var(--color-white-04)',
-                          borderRadius: 2, color: 'var(--color-gray-02)',
-                        }}>#{tag}</span>
+                        <span key={tag} className="badge-tag">
+                          #{tag}
+                        </span>
                       ))}
                     </div>
                   )}
                 </div>
 
-                {/* link to full entry */}
-                <div style={{ marginTop: '1rem', paddingTop: '0.75rem', borderTop: '1px solid var(--color-white-04)' }}>
-                  <a href={`/entries/${session.entry.id}`} style={{
-                    fontFamily: '"Courier New", monospace', fontSize: '0.6rem',
-                    letterSpacing: '0.15em', textTransform: 'uppercase',
-                    color: 'var(--color-purple-04)', textDecoration: 'none',
-                  }}>
+                <div className="vote-entry-link">
+                  <a href={`/entries/${session.entry.id}`} className="vote-entry-link-text">
                     VIEW FULL ENTRY →
                   </a>
                 </div>
               </div>
 
-              {/* ── VOTE BAR ── */}
               {total > 0 && (
-                <div style={{ marginBottom: '1.25rem' }}>
+                <div className="vote-bar-container">
                   <VoteBar up={counts.up} down={counts.down} userVote={userVote} />
                 </div>
               )}
 
-              {/* ── VOTE BUTTONS ── */}
               {voteStatus === 'voted' ? (
-                <div style={{
-                  background: 'white',
-                  border: `3px solid ${userVote === 1 ? 'var(--color-emerald-03)' : 'var(--color-red-03)'}`,
-                  borderRadius: 2,
-                  padding: '1.25rem',
-                  textAlign: 'center',
-                  boxShadow: `4px 4px 0 ${userVote === 1 ? 'var(--color-emerald-05)' : 'var(--color-red-01)'}`,
-                }}>
-                  <div style={{ fontSize: '1.5rem', marginBottom: '0.25rem' }}>
+                <div className={`vote-confirmation ${userVote === 1 ? 'vote-confirmation-up' : 'vote-confirmation-down'}`}>
+                  <div className="vote-confirmation-icon">
                     {userVote === 1 ? '▲' : '▼'}
                   </div>
-                  <p style={{
-                    fontFamily: '"Courier New", monospace', fontWeight: 700,
-                    fontSize: '0.72rem', letterSpacing: '0.15em',
-                    textTransform: 'uppercase', margin: 0,
-                    color: userVote === 1 ? 'var(--color-emerald-03)' : 'var(--color-red-02)',
-                  }}>
+                  <p className={`vote-confirmation-text ${userVote === 1 ? 'text-emerald' : 'text-red'}`}>
                     {userVote === 1 ? 'You voted YES — word approved' : 'You voted NAH — noted'}
                   </p>
-                  <p style={{ fontFamily: 'Georgia, serif', fontStyle: 'italic', fontSize: '0.75rem', color: 'var(--color-gray-01)', margin: '0.35rem 0 0' }}>
+                  <p className="vote-confirmation-subtext">
                     Come back for the next vote.
                   </p>
                 </div>
               ) : (
-                <div>
-                  <div style={{ fontSize: '0.58rem', letterSpacing: '0.2em', textTransform: 'uppercase', color: 'var(--color-purple-06)', marginBottom: '0.65rem', textAlign: 'center' }}>
+                <div className="vote-actions">
+                  <div className="vote-prompt">
                     Does this word deserve to exist?
                   </div>
-                  <div style={{ display: 'flex', gap: '0.75rem' }}>
+                  <div className="vote-buttons">
                     <VoteButton
                       direction="up"
                       onClick={() => handleVote(1)}
@@ -583,33 +591,15 @@ export default function VoteNow() {
                   </div>
                 </div>
               )}
-
             </div>
           )}
-
         </div>
 
-        <div style={{ position: 'relative', zIndex: 1 }}>
-          <Footer bg="transparent" />
-        </div>
+        <Footer bg="transparent" />
 
-        {/* ── TOAST ── */}
-        <div style={{
-          position: 'fixed', bottom: '2rem', left: '50%',
-          transform: `translateX(-50%) translateY(${toast.visible ? 0 : '12px'})`,
-          opacity: toast.visible ? 1 : 0,
-          transition: 'opacity 0.25s ease, transform 0.25s ease',
-          background: 'var(--color-purple-01)', color: 'white',
-          fontFamily: '"Courier New", monospace', fontSize: '0.72rem',
-          letterSpacing: '0.12em', textTransform: 'uppercase',
-          padding: '0.6rem 1.25rem',
-          border: '2px solid var(--color-purple-05)', borderRadius: 2,
-          boxShadow: '4px 4px 0 var(--color-purple-04)',
-          zIndex: 100, whiteSpace: 'nowrap', pointerEvents: 'none',
-        }}>
+        <div className={`toast ${toast.visible ? 'visible' : ''}`}>
           {toast.message}
         </div>
-
       </div>
     </>
   );

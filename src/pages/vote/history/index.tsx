@@ -1,7 +1,6 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { supabase } from '@/utils/supabase';
 import Footer from '@/components/Footer';
 import { getCache, CACHE_KEYS, TTL, setCache } from '@/utils/cache';
 
@@ -27,6 +26,44 @@ interface VoteHistoryRow {
 
 type SortMode = 'newest' | 'oldest' | 'most_votes' | 'highest_score' | 'lowest_score';
 type FilterMode = 'all' | 'approved' | 'rejected';
+
+// ─── API Client ───────────────────────────────────────────────────────────────
+const api = {
+  async getVoteHistory() {
+    // Since the proxy doesn't handle nested relationships well,
+    // we need to fetch vote history and then fetch entries separately
+    const historyRes = await fetch('/api/supabase/route?table=vote_history&select=id,entry_id,total_votes,upvotes,downvotes,final_score,started_at,ended_at,archived_at&orderBy=ended_at&orderDirection=desc');
+    if (!historyRes.ok) {
+      const error = await historyRes.json();
+      throw new Error(error.error || 'Failed to fetch vote history');
+    }
+    const { data: historyData } = await historyRes.json();
+    
+    if (!historyData || historyData.length === 0) return [];
+    
+    // Get unique entry IDs
+    const entryIds = [...new Set(historyData.map((h: any) => h.entry_id))];
+    
+    // Fetch all associated entries
+    const entryPromises = entryIds.map(id => 
+      fetch(`/api/supabase/route?table=entries&select=id,word,description,tone,rarity_level&id=${id}`)
+        .then(res => res.json())
+        .then(({ data }) => data[0])
+    );
+    
+    const entries = await Promise.all(entryPromises);
+    const entryMap = entries.reduce((acc: any, entry: any) => {
+      if (entry) acc[entry.id] = entry;
+      return acc;
+    }, {});
+    
+    // Combine history with entries
+    return historyData.map((h: any) => ({
+      ...h,
+      entry: entryMap[h.entry_id]
+    })).filter((h: any) => h.entry); // Filter out any with missing entries
+  }
+};
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 function fmt(dateStr: string | null) {
@@ -54,15 +91,22 @@ function applyFilter(rows: VoteHistoryRow[], filter: FilterMode): VoteHistoryRow
 function MiniBar({ upvotes, downvotes }: { upvotes: number; downvotes: number }) {
   const total = upvotes + downvotes;
   const upPct = total === 0 ? 50 : Math.round((upvotes / total) * 100);
+  
   return (
-    <div>
-      <div style={{ display: 'flex', height: 6, borderRadius: 1, overflow: 'hidden', background: 'var(--color-white-04)' }}>
-        <div style={{ width: `${upPct}%`, background: 'var(--color-emerald-07)', transition: 'width 0.4s ease' }} />
-        <div style={{ width: `${100 - upPct}%`, background: 'var(--color-red-03)', opacity: 0.55 }} />
+    <div className="mini-bar">
+      <div className="mini-bar-track">
+        <div 
+          className="mini-bar-fill mini-bar-up"
+          style={{ width: `${upPct}%` }} 
+        />
+        <div 
+          className="mini-bar-fill mini-bar-down"
+          style={{ width: `${100 - upPct}%` }} 
+        />
       </div>
-      <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 3 }}>
-        <span style={{ fontFamily: '"Courier New", monospace', fontSize: '0.52rem', color: 'var(--color-emerald-03)', letterSpacing: '0.08em' }}>▲ {upvotes}</span>
-        <span style={{ fontFamily: '"Courier New", monospace', fontSize: '0.52rem', color: 'var(--color-red-02)', letterSpacing: '0.08em' }}>{downvotes} ▼</span>
+      <div className="mini-bar-labels">
+        <span className="mini-bar-up-label">▲ {upvotes}</span>
+        <span className="mini-bar-down-label">{downvotes} ▼</span>
       </div>
     </div>
   );
@@ -70,24 +114,15 @@ function MiniBar({ upvotes, downvotes }: { upvotes: number; downvotes: number })
 
 function ScoreBadge({ score }: { score: number }) {
   const positive = score > 0;
-  const neutral  = score === 0;
-  const bg     = positive ? 'var(--color-emerald-07)' : neutral ? 'var(--color-white-04)' : 'rgba(210,17,13,0.12)';
-  const border = positive ? 'var(--color-emerald-03)' : neutral ? 'var(--color-gray-01)' : 'var(--color-red-03)';
-  const color  = positive ? 'var(--color-emerald-03)' : neutral ? 'var(--color-gray-01)' : 'var(--color-red-02)';
+  const neutral = score === 0;
+  
+  let badgeClass = 'score-badge';
+  if (positive) badgeClass += ' score-badge-positive';
+  else if (neutral) badgeClass += ' score-badge-neutral';
+  else badgeClass += ' score-badge-negative';
 
   return (
-    <span style={{
-      fontFamily: '"Courier New", monospace',
-      fontWeight: 900,
-      fontSize: '0.7rem',
-      letterSpacing: '0.08em',
-      padding: '0.2rem 0.55rem',
-      border: `2px solid ${border}`,
-      borderRadius: 2,
-      background: bg,
-      color,
-      whiteSpace: 'nowrap',
-    }}>
+    <span className={badgeClass}>
       {positive ? '+' : ''}{score}
     </span>
   );
@@ -97,18 +132,8 @@ function HistoryCard({ row }: { row: VoteHistoryRow }) {
   const upPct = row.total_votes === 0 ? 50 : Math.round((row.upvotes / row.total_votes) * 100);
 
   return (
-    <div style={{
-      background: 'white',
-      border: '3px solid var(--color-purple-04)',
-      borderRadius: 2,
-      padding: '1.25rem 1.5rem',
-      boxShadow: '4px 4px 0 var(--color-white-04)',
-      transition: 'box-shadow 0.15s, transform 0.15s',
-      position: 'relative',
-      display: 'flex',
-      flexDirection: 'column',
-      gap: '0.65rem',
-    }}
+    <div 
+      className="history-card"
       onMouseEnter={e => {
         (e.currentTarget as HTMLElement).style.boxShadow = '5px 5px 0 var(--color-purple-04)';
         (e.currentTarget as HTMLElement).style.transform = 'translate(-1px,-1px)';
@@ -119,16 +144,12 @@ function HistoryCard({ row }: { row: VoteHistoryRow }) {
       }}
     >
       {/* gold corner */}
-      <div style={{ position: 'absolute', top: -3, right: -3, width: 9, height: 9, background: 'var(--color-gold-03)' }} />
+      <div className="corner-gold-sm" />
 
       {/* word row */}
-      <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: '0.5rem', flexWrap: 'wrap' }}>
-        <a href={`/entries/${row.entry.id}`} style={{ textDecoration: 'none' }}>
-          <span style={{
-            fontFamily: '"Courier New", monospace',
-            fontSize: '1.15rem', fontWeight: 900,
-            color: 'var(--color-purple-01)', letterSpacing: '-0.02em',
-          }}>
+      <div className="history-card-header">
+        <a href={`/entries/${row.entry.id}`} className="history-card-link">
+          <span className="history-card-word">
             {row.entry.word}
           </span>
         </a>
@@ -136,13 +157,7 @@ function HistoryCard({ row }: { row: VoteHistoryRow }) {
       </div>
 
       {/* description */}
-      <p style={{
-        fontFamily: 'Georgia, serif', fontStyle: 'italic',
-        fontSize: '0.85rem', color: 'var(--color-black-01)',
-        lineHeight: 1.6, margin: 0,
-        display: '-webkit-box', WebkitLineClamp: 2,
-        WebkitBoxOrient: 'vertical', overflow: 'hidden',
-      }}>
+      <p className="history-card-description">
         "{row.entry.description}"
       </p>
 
@@ -150,20 +165,16 @@ function HistoryCard({ row }: { row: VoteHistoryRow }) {
       <MiniBar upvotes={row.upvotes} downvotes={row.downvotes} />
 
       {/* meta strip */}
-      <div style={{
-        display: 'flex', justifyContent: 'space-between',
-        alignItems: 'center', flexWrap: 'wrap', gap: '0.4rem',
-        paddingTop: '0.5rem', borderTop: '1px solid var(--color-white-04)',
-      }}>
-        <div style={{ display: 'flex', gap: '0.85rem' }}>
-          <span style={{ fontFamily: '"Courier New", monospace', fontSize: '0.55rem', color: 'var(--color-gray-01)', letterSpacing: '0.1em', textTransform: 'uppercase' }}>
+      <div className="history-card-meta">
+        <div className="history-card-stats">
+          <span className="history-card-stat">
             {row.total_votes} vote{row.total_votes !== 1 ? 's' : ''}
           </span>
-          <span style={{ fontFamily: '"Courier New", monospace', fontSize: '0.55rem', color: 'var(--color-gray-01)', letterSpacing: '0.1em', textTransform: 'uppercase' }}>
+          <span className="history-card-stat">
             {upPct}% approval
           </span>
         </div>
-        <span style={{ fontFamily: '"Courier New", monospace', fontSize: '0.52rem', color: 'var(--color-gray-01)', letterSpacing: '0.08em' }}>
+        <span className="history-card-date">
           {fmt(row.ended_at)}
         </span>
       </div>
@@ -172,16 +183,18 @@ function HistoryCard({ row }: { row: VoteHistoryRow }) {
 }
 
 function SkeletonCard() {
-  const bar = (w: string, h = 11, delay = '0s') => (
-    <div style={{ width: w, height: h, background: 'var(--color-white-04)', borderRadius: 2, animation: `shimmer 1.4s ease ${delay} infinite alternate` }} />
-  );
   return (
-    <div style={{ background: 'white', border: '3px solid var(--color-white-04)', borderRadius: 2, padding: '1.25rem 1.5rem', boxShadow: '4px 4px 0 var(--color-white-04)', display: 'flex', flexDirection: 'column', gap: '0.65rem' }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between' }}>{bar('40%', 18)} {bar('14%', 22, '0.1s')}</div>
-      {bar('100%', 11, '0.1s')} {bar('80%', 11, '0.2s')}
-      {bar('100%', 6, '0.15s')}
-      <div style={{ display: 'flex', justifyContent: 'space-between', paddingTop: '0.5rem', borderTop: '1px solid var(--color-white-04)' }}>
-        {bar('30%', 10, '0.2s')} {bar('20%', 10, '0.3s')}
+    <div className="skeleton-card history-skeleton">
+      <div className="skeleton-header-row">
+        <div className="skeleton-title-md" />
+        <div className="skeleton-badge" />
+      </div>
+      <div className="skeleton-line" />
+      <div className="skeleton-line short" />
+      <div className="skeleton-mini-bar" />
+      <div className="skeleton-meta-row">
+        <div className="skeleton-stat" />
+        <div className="skeleton-stat-sm" />
       </div>
     </div>
   );
@@ -189,119 +202,69 @@ function SkeletonCard() {
 
 // ─── Page ─────────────────────────────────────────────────────────────────────
 export default function VoteHistory() {
-  const [rows,   setRows]   = useState<VoteHistoryRow[]>([]);
+  const [rows, setRows] = useState<VoteHistoryRow[]>([]);
   const [status, setStatus] = useState<'loading' | 'done' | 'error'>('loading');
-  const [sort,   setSort]   = useState<SortMode>('newest');
+  const [sort, setSort] = useState<SortMode>('newest');
   const [filter, setFilter] = useState<FilterMode>('all');
 
   useEffect(() => {
+    let isMounted = true;
+
     const fetchHistory = async () => {
-      // Try cache first
-      const cached = getCache<VoteHistoryRow[]>(CACHE_KEYS.VOTE_HISTORY, TTL.VOTE_HISTORY);
-      if (cached) {
-        setRows(cached);
-        setStatus('done');
-      }
+      try {
+        // Try cache first
+        const cached = getCache<VoteHistoryRow[]>(CACHE_KEYS.VOTE_HISTORY, TTL.VOTE_HISTORY);
+        if (cached && isMounted) {
+          setRows(cached);
+          setStatus('done');
+        }
 
-      // Fetch fresh
-      const { data, error } = await supabase
-        .from('vote_history')
-        .select(`
-          id, entry_id, total_votes, upvotes, downvotes, final_score,
-          started_at, ended_at, archived_at,
-          entry:entries ( id, word, description, tone, rarity_level )
-        `)
-        .order('ended_at', { ascending: false });
+        // Fetch fresh
+        const data = await api.getVoteHistory();
 
-      if (error) {
-        if (!cached) setStatus('error');
-      } else {
-        const rows = (data ?? []) as unknown as VoteHistoryRow[];
-        setRows(rows);
-        setCache(CACHE_KEYS.VOTE_HISTORY, rows);
+        if (!isMounted) return;
+
+        setRows(data);
+        setCache(CACHE_KEYS.VOTE_HISTORY, data);
         setStatus('done');
+      } catch (error) {
+        console.error('Failed to fetch vote history:', error);
+        if (isMounted && rows.length === 0) {
+          setStatus('error');
+        }
       }
     };
 
     fetchHistory();
-  }, []);
+
+    return () => {
+      isMounted = false;
+    };
+  }, [rows.length]);
+
   const processed = applySort(applyFilter(rows, filter), sort);
 
   // aggregate stats
   const totalVotesCast = rows.reduce((s, r) => s + r.total_votes, 0);
-  const approvedCount  = rows.filter(r => r.final_score > 0).length;
-  const rejectedCount  = rows.filter(r => r.final_score <= 0).length;
+  const approvedCount = rows.filter(r => r.final_score > 0).length;
+  const rejectedCount = rows.filter(r => r.final_score <= 0).length;
 
   return (
     <>
-      <style>{`
-        @keyframes shimmer { from { opacity: 0.5; } to { opacity: 1; } }
-        @keyframes slide-up {
-          from { opacity: 0; transform: translateY(10px); }
-          to   { opacity: 1; transform: translateY(0);    }
-        }
-        .hist-item { animation: slide-up 0.22s ease both; }
-        .hist-grid {
-          display: grid;
-          grid-template-columns: 1fr;
-          gap: 0.85rem;
-        }
-        @media (min-width: 640px) { .hist-grid { grid-template-columns: 1fr 1fr; } }
-
-        .ctrl-btn {
-          font-family: "Courier New", monospace;
-          font-size: 0.58rem;
-          letter-spacing: 0.14em;
-          text-transform: uppercase;
-          padding: 0.28rem 0.65rem;
-          border: 2px solid var(--color-white-04);
-          border-radius: 2px;
-          cursor: pointer;
-          background: white;
-          color: var(--color-gray-01);
-          transition: all 0.1s;
-          white-space: nowrap;
-        }
-        .ctrl-btn:hover  { border-color: var(--color-purple-04); color: var(--color-purple-04); }
-        .ctrl-btn.active { background: var(--color-purple-01); border-color: var(--color-purple-01); color: white; }
-        .ctrl-btn.emerald.active { background: var(--color-emerald-03); border-color: var(--color-emerald-03); color: white; }
-        .ctrl-btn.red.active     { background: var(--color-red-02);     border-color: var(--color-red-02);     color: white; }
-      `}</style>
-
-      <div style={{
-        minHeight: '100vh',
-        background: 'linear-gradient(145deg, var(--color-white-06) 0%, var(--color-white-02) 45%, var(--color-white-05) 100%)',
-        fontFamily: '"Courier New", monospace',
-        display: 'flex',
-        flexDirection: 'column',
-      }}>
-
+      <div className="page-wrapper history-page-wrapper">
         {/* dot grid */}
-        <div style={{
-          position: 'fixed', inset: 0, pointerEvents: 'none', zIndex: 0,
-          backgroundImage: 'radial-gradient(circle, rgba(109,6,177,0.09) 1px, transparent 1px)',
-          backgroundSize: '28px 28px',
-        }} />
+        <div className="bg-dot-grid" />
 
-        <div style={{ position: 'relative', zIndex: 1, maxWidth: 820, width: '100%', margin: '0 auto', padding: '2.5rem 2rem', flex: 1 }}>
-
+        <div className="history-container">
           {/* ── HEADER ── */}
-          <div style={{ marginBottom: '2.5rem' }}>
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '0.75rem', marginBottom: '0.5rem' }}>
-              <a href="/" style={{ textDecoration: 'none' }}>
-                <span style={{ fontFamily: '"Courier New", monospace', fontWeight: 900, fontSize: '1rem', color: 'var(--color-purple-01)', letterSpacing: '-0.02em' }}>
-                  ← LISHNIY
-                </span>
+          <div className="history-header">
+            <div className="history-header-top">
+              <a href="/" className="back-link">
+                ← LISHNIY
               </a>
               <button
                 onClick={() => { window.location.href = '/vote/now'; }}
-                style={{
-                  fontFamily: '"Courier New", monospace', fontWeight: 700,
-                  fontSize: '0.65rem', letterSpacing: '0.18em', textTransform: 'uppercase',
-                  cursor: 'pointer', border: '2px solid var(--color-emerald-03)', borderRadius: 2,
-                  padding: '0.45rem 0.9rem', background: 'var(--color-emerald-03)', color: 'white',
-                  boxShadow: '3px 3px 0 var(--color-emerald-05)', transition: 'transform 0.1s, box-shadow 0.1s',
-                }}
+                className="btn-vote-now"
                 onMouseEnter={e => {
                   (e.currentTarget as HTMLElement).style.transform = 'translate(-1px,-1px)';
                   (e.currentTarget as HTMLElement).style.boxShadow = '5px 5px 0 var(--color-emerald-05)';
@@ -315,28 +278,25 @@ export default function VoteHistory() {
               </button>
             </div>
 
-            <h1 style={{ fontSize: 'clamp(1.6rem, 5vw, 2.6rem)', fontWeight: 900, color: 'var(--color-purple-01)', textTransform: 'uppercase', letterSpacing: '-0.03em', textShadow: '3px 3px 0 var(--color-white-04)', margin: '0 0 0.3rem 0' }}>
+            <h1 className="history-title">
               VOTE HISTORY
             </h1>
-            <p style={{ fontFamily: 'Georgia, serif', fontStyle: 'italic', fontSize: '0.85rem', color: 'var(--color-gray-01)', margin: 0 }}>
+            <p className="history-subtitle">
               Every word that faced the jury. Every verdict that followed.
             </p>
           </div>
 
           {/* ── STATS STRIP ── */}
           {status === 'done' && rows.length > 0 && (
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '0.65rem', marginBottom: '1.75rem' }}>
+            <div className="history-stats-grid">
               {[
-                { label: 'Sessions',    val: rows.length         },
-                { label: 'Votes Cast',  val: totalVotesCast      },
-                { label: 'Approved',    val: `${approvedCount}↑ / ${rejectedCount}↓` },
+                { label: 'Sessions', val: rows.length },
+                { label: 'Votes Cast', val: totalVotesCast },
+                { label: 'Approved', val: `${approvedCount}↑ / ${rejectedCount}↓` },
               ].map(({ label, val }) => (
-                <div key={label} style={{
-                  background: 'white', border: '2px solid var(--color-white-04)', borderRadius: 2,
-                  padding: '0.85rem 1rem', textAlign: 'center', boxShadow: '3px 3px 0 var(--color-white-04)',
-                }}>
-                  <div style={{ fontSize: '1.1rem', fontWeight: 900, color: 'var(--color-purple-01)', letterSpacing: '-0.02em', marginBottom: '0.15rem' }}>{val}</div>
-                  <div style={{ fontSize: '0.52rem', color: 'var(--color-gray-01)', letterSpacing: '0.15em', textTransform: 'uppercase' }}>{label}</div>
+                <div key={label} className="history-stat-card">
+                  <div className="history-stat-value">{val}</div>
+                  <div className="history-stat-label">{label}</div>
                 </div>
               ))}
             </div>
@@ -344,12 +304,11 @@ export default function VoteHistory() {
 
           {/* ── CONTROLS ── */}
           {status === 'done' && rows.length > 0 && (
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '0.65rem', marginBottom: '1.25rem' }}>
-
+            <div className="history-controls">
               {/* filter */}
-              <div style={{ display: 'flex', gap: '0.35rem', flexWrap: 'wrap' }}>
+              <div className="filter-buttons">
                 {([
-                  ['all',      'All',      ''],
+                  ['all', 'All', ''],
                   ['approved', 'Approved', 'emerald'],
                   ['rejected', 'Rejected', 'red'],
                 ] as [FilterMode, string, string][]).map(([f, label, cls]) => (
@@ -364,11 +323,11 @@ export default function VoteHistory() {
               </div>
 
               {/* sort */}
-              <div style={{ display: 'flex', gap: '0.35rem', flexWrap: 'wrap' }}>
+              <div className="sort-buttons">
                 {([
-                  ['newest',        'Newest'],
-                  ['oldest',        'Oldest'],
-                  ['most_votes',    'Most Votes'],
+                  ['newest', 'Newest'],
+                  ['oldest', 'Oldest'],
+                  ['most_votes', 'Most Votes'],
                   ['highest_score', 'Top Score'],
                 ] as [SortMode, string][]).map(([s, label]) => (
                   <button
@@ -391,32 +350,32 @@ export default function VoteHistory() {
           )}
 
           {status === 'error' && (
-            <div style={{ textAlign: 'center', padding: '4rem 1rem' }}>
-              <div style={{ fontSize: '3rem', opacity: 0.2, marginBottom: '1rem', userSelect: 'none' }}>▲</div>
-              <p style={{ fontWeight: 700, fontSize: '0.85rem', color: 'var(--color-red-01)', letterSpacing: '0.1em', textTransform: 'uppercase', marginBottom: '0.4rem' }}>
+            <div className="empty-state">
+              <div className="empty-state-icon error">▲</div>
+              <p className="empty-state-title error">
                 Failed to load history
               </p>
-              <p style={{ fontFamily: 'Georgia, serif', fontStyle: 'italic', fontSize: '0.8rem', color: 'var(--color-gray-01)', margin: 0 }}>
-                Supabase returned an error. Check your connection.
+              <p className="empty-state-description">
+                Something went wrong. Check your connection.
               </p>
             </div>
           )}
 
           {status === 'done' && rows.length === 0 && (
-            <div style={{ textAlign: 'center', padding: '4rem 1rem' }}>
-              <div style={{ fontSize: '3rem', opacity: 0.2, marginBottom: '1rem', userSelect: 'none' }}>◇</div>
-              <p style={{ fontWeight: 700, fontSize: '0.85rem', color: 'var(--color-purple-04)', letterSpacing: '0.1em', textTransform: 'uppercase', marginBottom: '0.4rem' }}>
+            <div className="empty-state">
+              <div className="empty-state-icon">◇</div>
+              <p className="empty-state-title">
                 No history yet
               </p>
-              <p style={{ fontFamily: 'Georgia, serif', fontStyle: 'italic', fontSize: '0.8rem', color: 'var(--color-gray-01)', margin: 0 }}>
+              <p className="empty-state-description">
                 No votes have been archived yet. Be the first to judge a word.
               </p>
             </div>
           )}
 
           {status === 'done' && processed.length === 0 && rows.length > 0 && (
-            <div style={{ textAlign: 'center', padding: '3rem 1rem' }}>
-              <p style={{ fontFamily: 'Georgia, serif', fontStyle: 'italic', fontSize: '0.85rem', color: 'var(--color-gray-01)', margin: 0 }}>
+            <div className="empty-state small">
+              <p className="empty-state-description">
                 No entries match this filter.
               </p>
             </div>
@@ -431,12 +390,9 @@ export default function VoteHistory() {
               ))}
             </div>
           )}
-
         </div>
 
-        <div style={{ position: 'relative', zIndex: 1 }}>
-          <Footer bg="transparent" />
-        </div>
+        <Footer bg="transparent" />
       </div>
     </>
   );

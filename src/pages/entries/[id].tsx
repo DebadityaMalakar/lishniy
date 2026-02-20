@@ -2,7 +2,6 @@
 
 import { useState, useEffect, useRef } from 'react';
 import { useParams, useRouter } from 'next/navigation';
-import { supabase } from '@/utils/supabase';
 import SearchBar from '@/components/SearchBar';
 import Footer from '@/components/Footer';
 import { CACHE_KEYS, getCache, setCache, TTL } from '@/utils/cache';
@@ -21,24 +20,32 @@ interface Entry {
 
 type Status = 'loading' | 'done' | 'error' | 'not_found';
 
+// ─── API Client ───────────────────────────────────────────────────────────────
+const api = {
+  async getEntry(id: string) {
+    // Try cache first
+    const cached = getCache<Entry>(CACHE_KEYS.ENTRY(id), TTL.ENTRY_DETAIL);
+    if (cached) return cached;
+
+    const res = await fetch(`/api/supabase/route?table=entries&select=id,word,description,tags,language,tone,rarity_level,created_at&id=${id}`);
+    if (!res.ok) throw new Error('Failed to fetch entry');
+    const { data } = await res.json();
+    const entry = data[0];
+    
+    // Cache the result
+    if (entry) setCache(CACHE_KEYS.ENTRY(id), entry);
+    return entry;
+  }
+};
+
 // ─── Sub-components ───────────────────────────────────────────────────────────
 function RarityPips({ level }: { level: number }) {
   return (
-    <div style={{ display: 'flex', gap: 3, alignItems: 'center' }}>
+    <div className="pips-container">
       {Array.from({ length: 10 }).map((_, i) => (
-        <div key={i} style={{
-          width: 8, height: 8,
-          background: i < level ? 'var(--color-gold-03)' : 'var(--color-white-04)',
-          borderRadius: 1,
-        }} />
+        <div key={i} className={`pip ${i < level ? 'filled' : ''}`} style={{ width: 8, height: 8 }} />
       ))}
-      <span style={{
-        fontFamily: '"Courier New", monospace',
-        fontSize: '0.6rem',
-        color: 'var(--color-gold-04)',
-        letterSpacing: '0.1em',
-        marginLeft: 6,
-      }}>
+      <span className="rarity-level">
         {level}/10
       </span>
     </div>
@@ -47,17 +54,7 @@ function RarityPips({ level }: { level: number }) {
 
 function ToneBadge({ tone }: { tone: string }) {
   return (
-    <span style={{
-      fontFamily: '"Courier New", monospace',
-      fontSize: '0.6rem',
-      letterSpacing: '0.18em',
-      textTransform: 'uppercase',
-      padding: '0.2rem 0.6rem',
-      border: '2px solid var(--color-purple-04)',
-      borderRadius: 2,
-      color: 'var(--color-purple-04)',
-      background: 'var(--color-white-02)',
-    }}>
+    <span className="badge-tone badge-tone-lg">
       {tone}
     </span>
   );
@@ -69,87 +66,43 @@ function EntryCard({ entry, cardRef }: { entry: Entry; cardRef: React.RefObject<
     <div
       ref={cardRef}
       id="entry-card"
-      style={{
-        background: 'white',
-        border: '3px solid var(--color-purple-01)',
-        borderRadius: 2,
-        padding: '2.5rem 2.5rem 2rem',
-        position: 'relative',
-        boxShadow: '8px 8px 0 var(--color-purple-04)',
-      }}
+      className="entry-card"
     >
       {/* corner pips */}
-      <div style={{ position: 'absolute', top: -3, left:  -3, width: 12, height: 12, background: 'var(--color-gold-03)' }} />
-      <div style={{ position: 'absolute', top: -3, right: -3, width: 12, height: 12, background: 'var(--color-gold-03)' }} />
-      <div style={{ position: 'absolute', bottom: -3, left:  -3, width: 12, height: 12, background: 'var(--color-purple-04)' }} />
-      <div style={{ position: 'absolute', bottom: -3, right: -3, width: 12, height: 12, background: 'var(--color-purple-04)' }} />
+      <div className="corner-gold-lg" />
+      <div className="corner-gold-lg corner-gold-lg-right" />
+      <div className="corner-purple-lg" />
+      <div className="corner-purple-lg corner-purple-lg-right" />
 
       {/* eyebrow row */}
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.5rem', flexWrap: 'wrap', gap: '0.5rem' }}>
-        <span style={{
-          fontFamily: '"Courier New", monospace',
-          fontSize: '0.58rem',
-          letterSpacing: '0.25em',
-          textTransform: 'uppercase',
-          color: 'var(--color-purple-06)',
-        }}>
+      <div className="entry-card-header">
+        <span className="entry-card-eyebrow">
           ◆ LISHNIY DICTIONARY
         </span>
         <ToneBadge tone={entry.tone} />
       </div>
 
       {/* word */}
-      <h1 style={{
-        fontFamily: '"Courier New", monospace',
-        fontSize: 'clamp(2.4rem, 8vw, 4.5rem)',
-        fontWeight: 900,
-        color: 'var(--color-purple-01)',
-        letterSpacing: '-0.04em',
-        textTransform: 'lowercase',
-        margin: '0 0 0.2rem 0',
-        lineHeight: 1,
-        textShadow: '3px 3px 0 var(--color-white-04)',
-      }}>
+      <h1 className="entry-card-word">
         {entry.word}
       </h1>
 
       {/* language tag */}
-      <div style={{
-        fontFamily: '"Courier New", monospace',
-        fontSize: '0.62rem',
-        color: 'var(--color-gray-01)',
-        letterSpacing: '0.15em',
-        textTransform: 'uppercase',
-        marginBottom: '1.75rem',
-      }}>
+      <div className="entry-card-language">
         {entry.language}
       </div>
 
       {/* divider */}
-      <div style={{ height: 2, background: 'linear-gradient(90deg, var(--color-purple-01), var(--color-white-02))', marginBottom: '1.75rem', borderRadius: 1 }} />
+      <div className="divider-gradient entry-card-divider" />
 
       {/* description */}
-      <p style={{
-        fontFamily: 'Georgia, serif',
-        fontSize: 'clamp(1rem, 2.5vw, 1.2rem)',
-        color: 'var(--color-black-01)',
-        lineHeight: 1.75,
-        fontStyle: 'italic',
-        margin: '0 0 2rem 0',
-      }}>
+      <p className="entry-card-description">
         "{entry.description}"
       </p>
 
       {/* rarity */}
-      <div style={{ marginBottom: entry.tags.length > 0 ? '1rem' : 0 }}>
-        <div style={{
-          fontFamily: '"Courier New", monospace',
-          fontSize: '0.55rem',
-          letterSpacing: '0.2em',
-          textTransform: 'uppercase',
-          color: 'var(--color-gray-01)',
-          marginBottom: '0.4rem',
-        }}>
+      <div className={entry.tags.length > 0 ? 'mb-4' : ''}>
+        <div className="rarity-label">
           RARITY
         </div>
         <RarityPips level={entry.rarity_level} />
@@ -157,18 +110,9 @@ function EntryCard({ entry, cardRef }: { entry: Entry; cardRef: React.RefObject<
 
       {/* tags */}
       {entry.tags.length > 0 && (
-        <div style={{ marginTop: '1rem', display: 'flex', gap: '0.35rem', flexWrap: 'wrap' }}>
+        <div className="tags-container entry-card-tags">
           {entry.tags.map(tag => (
-            <span key={tag} style={{
-              fontFamily: '"Courier New", monospace',
-              fontSize: '0.58rem',
-              letterSpacing: '0.1em',
-              padding: '0.15rem 0.5rem',
-              background: 'var(--color-white-01)',
-              border: '2px solid var(--color-white-04)',
-              borderRadius: 2,
-              color: 'var(--color-gray-02)',
-            }}>
+            <span key={tag} className="badge-tag">
               #{tag}
             </span>
           ))}
@@ -176,18 +120,7 @@ function EntryCard({ entry, cardRef }: { entry: Entry; cardRef: React.RefObject<
       )}
 
       {/* watermark footer inside card */}
-      <div style={{
-        marginTop: '2rem',
-        paddingTop: '1rem',
-        borderTop: '1px solid var(--color-white-04)',
-        fontFamily: '"Courier New", monospace',
-        fontSize: '0.55rem',
-        color: 'var(--color-white-04)',
-        letterSpacing: '0.15em',
-        textTransform: 'uppercase',
-        display: 'flex',
-        justifyContent: 'space-between',
-      }}>
+      <div className="entry-card-watermark">
         <span>lishniy.app</span>
         <span>лишний · superfluous · unnecessary</span>
       </div>
@@ -201,24 +134,7 @@ function ActionBtn({
   return (
     <button
       onClick={onClick}
-      style={{
-        fontFamily: '"Courier New", monospace',
-        fontSize: '0.72rem',
-        fontWeight: 700,
-        letterSpacing: '0.12em',
-        textTransform: 'uppercase',
-        cursor: 'pointer',
-        border: `2px solid ${subtle ? 'var(--color-white-04)' : 'var(--color-purple-04)'}`,
-        borderRadius: 2,
-        padding: '0.6rem 1rem',
-        background: subtle ? 'white' : 'var(--color-purple-01)',
-        color: subtle ? 'var(--color-gray-01)' : 'white',
-        boxShadow: subtle ? '3px 3px 0 var(--color-white-04)' : '3px 3px 0 var(--color-purple-04)',
-        display: 'flex',
-        alignItems: 'center',
-        gap: '0.4rem',
-        transition: 'transform 0.1s, box-shadow 0.1s',
-      }}
+      className={`action-btn ${subtle ? 'action-btn-subtle' : 'action-btn-primary'}`}
       onMouseEnter={e => {
         (e.currentTarget as HTMLElement).style.transform = 'translate(-1px,-1px)';
         (e.currentTarget as HTMLElement).style.boxShadow = subtle
@@ -241,27 +157,7 @@ function ActionBtn({
 // ─── Toast ────────────────────────────────────────────────────────────────────
 function Toast({ message, visible }: { message: string; visible: boolean }) {
   return (
-    <div style={{
-      position: 'fixed',
-      bottom: '2rem',
-      left: '50%',
-      transform: `translateX(-50%) translateY(${visible ? 0 : '12px'})`,
-      opacity: visible ? 1 : 0,
-      transition: 'opacity 0.25s ease, transform 0.25s ease',
-      background: 'var(--color-purple-01)',
-      color: 'white',
-      fontFamily: '"Courier New", monospace',
-      fontSize: '0.72rem',
-      letterSpacing: '0.12em',
-      textTransform: 'uppercase',
-      padding: '0.6rem 1.25rem',
-      border: '2px solid var(--color-purple-05)',
-      borderRadius: 2,
-      boxShadow: '4px 4px 0 var(--color-purple-04)',
-      zIndex: 100,
-      whiteSpace: 'nowrap',
-      pointerEvents: 'none',
-    }}>
+    <div className={`toast ${visible ? 'visible' : 'hidden'}`}>
       {message}
     </div>
   );
@@ -269,22 +165,22 @@ function Toast({ message, visible }: { message: string; visible: boolean }) {
 
 // ─── Skeleton ─────────────────────────────────────────────────────────────────
 function EntryCardSkeleton() {
-  const bar = (w: string, h = 14, delay = '0s') => (
-    <div style={{ width: w, height: h, background: 'var(--color-white-04)', borderRadius: 2, animation: `shimmer 1.4s ease ${delay} infinite alternate` }} />
-  );
   return (
-    <div style={{ background: 'white', border: '3px solid var(--color-white-04)', borderRadius: 2, padding: '2.5rem', boxShadow: '8px 8px 0 var(--color-white-04)' }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '1.5rem' }}>{bar('120px', 10)} {bar('60px', 20)}</div>
-      {bar('55%', 56, '0.1s')}
-      <div style={{ height: 2, background: 'var(--color-white-04)', margin: '1.75rem 0', borderRadius: 1 }} />
-      <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', marginBottom: '2rem' }}>
-        {bar('100%', 14, '0.15s')}
-        {bar('92%',  14, '0.25s')}
-        {bar('78%',  14, '0.35s')}
+    <div className="skeleton-entry-card">
+      <div className="skeleton-entry-header">
+        <div className="skeleton-entry-eyebrow" />
+        <div className="skeleton-entry-tone" />
       </div>
-      <div style={{ display: 'flex', gap: 3 }}>
+      <div className="skeleton-entry-word" />
+      <div className="divider-white skeleton-divider" />
+      <div className="skeleton-entry-description">
+        <div className="skeleton-line" />
+        <div className="skeleton-line short" />
+        <div className="skeleton-line shorter" />
+      </div>
+      <div className="skeleton-pips">
         {Array.from({ length: 10 }).map((_, i) => (
-          <div key={i} style={{ width: 8, height: 8, background: 'var(--color-white-04)', borderRadius: 1 }} />
+          <div key={i} className="skeleton-pip-lg" />
         ))}
       </div>
     </div>
@@ -304,39 +200,43 @@ export default function EntryPage() {
 
   const cardRef = useRef<HTMLDivElement>(null!);
 
-  // In EntryPage component, modify the data fetching:
-
   useEffect(() => {
     if (!id) return;
 
+    let isMounted = true;
+
     const fetchEntry = async () => {
-      // Try cache first
-      const cached = getCache<Entry>(CACHE_KEYS.ENTRY(id), TTL.ENTRY_DETAIL);
-      if (cached) {
-        setEntry(cached);
-        setStatus('done');
-      }
-
-      // Fetch fresh in background
-      const { data, error } = await supabase
-        .from('entries')
-        .select('id, word, description, tags, language, tone, rarity_level, created_at')
-        .eq('id', id)
-        .single();
-
-      if (error || !data) {
-        if (!cached) {
-          setStatus(error?.code === 'PGRST116' ? 'not_found' : 'error');
+      try {
+        // Try cache first
+        const cached = getCache<Entry>(CACHE_KEYS.ENTRY(id), TTL.ENTRY_DETAIL);
+        if (cached && isMounted) {
+          setEntry(cached);
+          setStatus('done');
         }
-      } else {
-        setEntry(data);
-        setCache(CACHE_KEYS.ENTRY(id), data);
-        setStatus('done');
+
+        // Fetch fresh in background
+        const data = await api.getEntry(id);
+
+        if (!isMounted) return;
+
+        if (!data) {
+          if (!cached) setStatus('not_found');
+        } else {
+          setEntry(data);
+          setStatus('done');
+        }
+      } catch (error) {
+        console.error('Failed to fetch entry:', error);
+        if (isMounted && !entry) setStatus('error');
       }
     };
 
     fetchEntry();
-  }, [id]);
+
+    return () => {
+      isMounted = false;
+    };
+  }, [id, entry]);
 
   // ── Toast helper ──
   const showToast = (message: string) => {
@@ -345,37 +245,37 @@ export default function EntryPage() {
   };
 
   // ── Share ──
-const handleShare = async () => {
-  const url = window.location.href;
+  const handleShare = async () => {
+    const url = window.location.href;
 
-  if (navigator.share) {
-    try {
-      await navigator.share({ title: `Lishniy: ${entry?.word}`, text: entry?.description, url });
-    } catch (_) { /* user cancelled */ }
-    return;
-  }
+    if (navigator.share) {
+      try {
+        await navigator.share({ title: `Lishniy: ${entry?.word}`, text: entry?.description, url });
+      } catch (_) { /* user cancelled */ }
+      return;
+    }
 
-  try {
-    await navigator.clipboard.writeText(url);
-    showToast('Link copied to clipboard ◆');
-  } catch (_) {
-    // Fallback for insecure contexts or unsupported browsers
-    const textArea = document.createElement('textarea');
-    textArea.value = url;
-    textArea.style.position = 'fixed';
-    textArea.style.opacity = '0';
-    document.body.appendChild(textArea);
-    textArea.focus();
-    textArea.select();
     try {
-      document.execCommand('copy');
+      await navigator.clipboard.writeText(url);
       showToast('Link copied to clipboard ◆');
     } catch (_) {
-      showToast('Clipboard not supported ▲');
+      // Fallback for insecure contexts or unsupported browsers
+      const textArea = document.createElement('textarea');
+      textArea.value = url;
+      textArea.style.position = 'fixed';
+      textArea.style.opacity = '0';
+      document.body.appendChild(textArea);
+      textArea.focus();
+      textArea.select();
+      try {
+        document.execCommand('copy');
+        showToast('Link copied to clipboard ◆');
+      } catch (_) {
+        showToast('Clipboard not supported ▲');
+      }
+      document.body.removeChild(textArea);
     }
-    document.body.removeChild(textArea);
-  }
-};
+  };
 
   // ── Screenshot via html2canvas ──
   const handleScreenshot = async () => {
@@ -407,40 +307,18 @@ const handleShare = async () => {
 
   return (
     <>
-      <style>{`
-        @keyframes shimmer { from { opacity: 0.5; } to { opacity: 1; } }
-        @keyframes pop-in {
-          from { opacity: 0; transform: scale(0.97) translateY(14px); }
-          to   { opacity: 1; transform: scale(1)    translateY(0);    }
-        }
-        .entry-card-anim { animation: pop-in 0.5s cubic-bezier(0.22,1,0.36,1) both; }
-      `}</style>
-
-      <div style={{
-        minHeight: '100vh',
-        background: 'linear-gradient(145deg, var(--color-white-06) 0%, var(--color-white-02) 45%, var(--color-white-05) 100%)',
-        fontFamily: '"Courier New", monospace',
-        display: 'flex',
-        flexDirection: 'column',
-      }}>
-
+      <div className="page-wrapper entry-page-wrapper">
         {/* dot grid */}
-        <div style={{
-          position: 'fixed', inset: 0, pointerEvents: 'none', zIndex: 0,
-          backgroundImage: 'radial-gradient(circle, rgba(109,6,177,0.09) 1px, transparent 1px)',
-          backgroundSize: '28px 28px',
-        }} />
+        <div className="bg-dot-grid" />
 
-        <div style={{ position: 'relative', zIndex: 1, maxWidth: 720, width: '100%', margin: '0 auto', padding: '2.5rem 2rem', flex: 1 }}>
+        <div className="entry-container">
 
           {/* ── TOP NAV ── */}
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '2rem', gap: '1rem', flexWrap: 'wrap' }}>
-            <a href="/" style={{ textDecoration: 'none', flexShrink: 0 }}>
-              <span style={{ fontFamily: '"Courier New", monospace', fontWeight: 900, fontSize: '1rem', color: 'var(--color-purple-01)', letterSpacing: '-0.02em' }}>
-                ← lishniy
-              </span>
+          <div className="entry-nav">
+            <a href="/" className="back-link">
+              ← lishniy
             </a>
-            <div style={{ flex: 1, minWidth: 200, maxWidth: 420 }}>
+            <div className="entry-search">
               <SearchBar
                 value={search}
                 onChange={setSearch}
@@ -456,25 +334,25 @@ const handleShare = async () => {
           {status === 'loading' && <EntryCardSkeleton />}
 
           {status === 'not_found' && (
-            <div style={{ textAlign: 'center', padding: '4rem 1rem' }}>
-              <div style={{ fontSize: '3rem', opacity: 0.2, marginBottom: '1rem' }}>◇</div>
-              <p style={{ fontWeight: 700, fontSize: '0.85rem', color: 'var(--color-purple-04)', letterSpacing: '0.1em', textTransform: 'uppercase', marginBottom: '0.4rem' }}>
+            <div className="empty-state">
+              <div className="empty-state-icon">◇</div>
+              <p className="empty-state-title">
                 Entry not found
               </p>
-              <p style={{ fontFamily: 'Georgia, serif', fontStyle: 'italic', fontSize: '0.8rem', color: 'var(--color-gray-01)', margin: 0 }}>
+              <p className="empty-state-description">
                 This word may not exist yet. Or it does and we misplaced it.
               </p>
             </div>
           )}
 
           {status === 'error' && (
-            <div style={{ textAlign: 'center', padding: '4rem 1rem' }}>
-              <div style={{ fontSize: '3rem', opacity: 0.2, marginBottom: '1rem' }}>▲</div>
-              <p style={{ fontWeight: 700, fontSize: '0.85rem', color: 'var(--color-red-01)', letterSpacing: '0.1em', textTransform: 'uppercase', marginBottom: '0.4rem' }}>
+            <div className="empty-state">
+              <div className="empty-state-icon error">▲</div>
+              <p className="empty-state-title error">
                 Failed to load entry
               </p>
-              <p style={{ fontFamily: 'Georgia, serif', fontStyle: 'italic', fontSize: '0.8rem', color: 'var(--color-gray-01)', margin: 0 }}>
-                Supabase returned an error. Check your connection and try again.
+              <p className="empty-state-description">
+                Something went wrong. Check your connection and try again.
               </p>
             </div>
           )}
@@ -483,17 +361,17 @@ const handleShare = async () => {
             <div className="entry-card-anim">
 
               {/* breadcrumb */}
-              <div style={{ marginBottom: '1.25rem', fontSize: '0.6rem', color: 'var(--color-gray-01)', letterSpacing: '0.15em', textTransform: 'uppercase' }}>
-                <a href="/search" style={{ color: 'var(--color-purple-04)', textDecoration: 'none' }}>Search</a>
+              <div className="entry-breadcrumb">
+                <a href="/search" className="breadcrumb-link">Search</a>
                 {' '}›{' '}
-                <span style={{ color: 'var(--color-black-01)' }}>{entry.word}</span>
+                <span className="breadcrumb-current">{entry.word}</span>
               </div>
 
               {/* ── THE CARD ── */}
               <EntryCard entry={entry} cardRef={cardRef} />
 
               {/* ── ACTION BUTTONS ── */}
-              <div style={{ display: 'flex', gap: '0.65rem', marginTop: '1.25rem', flexWrap: 'wrap' }}>
+              <div className="action-buttons">
                 <ActionBtn
                   onClick={handleShare}
                   label="Share"
@@ -532,25 +410,15 @@ const handleShare = async () => {
               </div>
 
               {/* metadata strip */}
-              <div style={{
-                marginTop: '1.5rem',
-                padding: '0.75rem 1rem',
-                background: 'white',
-                border: '2px solid var(--color-white-04)',
-                borderRadius: 2,
-                display: 'flex',
-                gap: '1.5rem',
-                flexWrap: 'wrap',
-                boxShadow: '3px 3px 0 var(--color-white-04)',
-              }}>
+              <div className="metadata-strip">
                 {[
                   { label: 'ID',      value: entry.id.slice(0, 8) + '…' },
                   { label: 'LANG',    value: entry.language.toUpperCase() },
                   { label: 'ADDED',   value: new Date(entry.created_at).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }) },
                 ].map(({ label, value }) => (
-                  <div key={label}>
-                    <div style={{ fontSize: '0.5rem', letterSpacing: '0.2em', color: 'var(--color-gray-01)', textTransform: 'uppercase', marginBottom: 2 }}>{label}</div>
-                    <div style={{ fontSize: '0.72rem', color: 'var(--color-black-01)', fontWeight: 700 }}>{value}</div>
+                  <div key={label} className="metadata-item">
+                    <div className="metadata-label">{label}</div>
+                    <div className="metadata-value">{value}</div>
                   </div>
                 ))}
               </div>
@@ -560,9 +428,7 @@ const handleShare = async () => {
 
         </div>
 
-        <div style={{ position: 'relative', zIndex: 1 }}>
-          <Footer bg="transparent" />
-        </div>
+        <Footer bg="transparent" />
 
         <Toast message={toast.message} visible={toast.visible} />
       </div>
