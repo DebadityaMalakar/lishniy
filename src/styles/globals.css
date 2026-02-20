@@ -1,26 +1,60 @@
 @import "tailwindcss";
 
-:root {
-  --background: #ffffff;
-  --foreground: #171717;
+@theme {
+    --color-white-01: #e4eed1;
+    --color-white-02: #dcd5f8;
+    --color-white-03: #f8fbd5;
+    --color-white-04: #e1c6df;
+    --color-white-05: #ffd0fa;
+    --color-white-06: #f2e4f3;
+    --color-black-01: #230f08;
+    --color-black-02: #0a181a;
+    --color-black-03: #160015;
+    --color-black-04: #00190b;
+    --color-black-05: #101a2e;
+    --color-purple-01: #6d06b1;
+    --color-purple-02: #8d05b4;
+    --color-purple-03: #8d19a4;
+    --color-purple-04: #5e34af;
+    --color-purple-05: #6f1bc0;
+    --color-purple-06: #b711cd;
+    --color-purple-07: #7928c5;
+    --color-purple-08: #881cd2;
+    --color-gold-01: #cac13a;
+    --color-gold-02: #ebc91a;
+    --color-gold-03: #deab21;
+    --color-gold-04: #e9a223;
+    --color-gold-05: #ed981f;
+    --color-gold-06: #bdb61f;
+    --color-gold-07: #e2b700;
+    --color-gold-08: #dfcf10;
+    --color-emerald-01: #35914c;
+    --color-emerald-02: #17ae23;
+    --color-emerald-03: #158d48;
+    --color-emerald-04: #22a51b;
+    --color-emerald-05: #109326;
+    --color-emerald-06: #07c522;
+    --color-emerald-07: #37be53;
+    --color-emerald-08: #24c03e;
+    --color-sapphire-01: #245ccd;
+    --color-sapphire-02: #1a81dd;
+    --color-sapphire-03: #2d3eae;
+    --color-sapphire-04: #395ab5;
+    --color-sapphire-05: #1874d9;
+    --color-sapphire-06: #2e48ca;
+    --color-sapphire-07: #156add;
+    --color-sapphire-08: #2556e4;
+    --color-red-01: #d83809;
+    --color-red-02: #d2110d;
+    --color-red-03: #cd091d;
+    --color-gray-01: #a16277;
+    --color-gray-02: #527e4d;
+    --color-gray-03: #819d67;
+    --color-orange-01: #ce5e18;
+    --color-orange-02: #f39715;
+    --color-orange-03: #e87700;
 }
 
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
-}
-
-body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+.transparency-bit{
+  background-color: transparent;
 }
