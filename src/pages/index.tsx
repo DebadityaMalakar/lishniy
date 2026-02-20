@@ -132,31 +132,49 @@ export default function Index() {
   const [loadingEntry, setLoadingEntry] = useState(true);
   const [surpriseLoading, setSurpriseLoading] = useState(false);
 
-  // Fetch total count + 6 random featured entries on mount
-// In your home page component, modify the featured entries fetch:
-
+  // Fetch total count + featured entries on mount
   useEffect(() => {
-    // Try cache first
-    const cached = getCache<Entry[]>(CACHE_KEYS.ENTRIES_ALL, TTL.ENTRIES_LIST);
-    if (cached) {
-      const shuffled = [...cached].sort(() => Math.random() - 0.5);
+    // Try cache for featured entries first
+    const cachedEntries = getCache<Entry[]>(CACHE_KEYS.ENTRIES_ALL, TTL.ENTRIES_LIST);
+    if (cachedEntries) {
+      const shuffled = [...cachedEntries].sort(() => Math.random() - 0.5);
       setEntries(shuffled);
       setLoadingEntry(false);
     }
 
+    // Try cache for total count
+    const cachedTotal = getCache<number>(CACHE_KEYS.TOTAL_COUNT, TTL.ENTRIES_LIST);
+    if (cachedTotal !== null) {
+      setTotal(cachedTotal);
+    }
+
     // Always fetch fresh in background
-    supabase
-      .from('entries')
-      .select('id, word, description, tone')
-      .limit(6)
-      .then(({ data }) => {
-        if (data && data.length > 0) {
-          setCache(CACHE_KEYS.ENTRIES_ALL, data);
-          const shuffled = [...data].sort(() => Math.random() - 0.5);
-          setEntries(shuffled);
-        }
-        setLoadingEntry(false);
-      });
+    Promise.all([
+      // Fetch featured entries
+      supabase
+        .from('entries')
+        .select('id, word, description, tone')
+        .limit(6)
+        .then(({ data }) => {
+          if (data && data.length > 0) {
+            setCache(CACHE_KEYS.ENTRIES_ALL, data);
+            const shuffled = [...data].sort(() => Math.random() - 0.5);
+            setEntries(shuffled);
+          }
+          setLoadingEntry(false);
+        }),
+
+      // Fetch total count
+      supabase
+        .from('entries')
+        .select('*', { count: 'exact', head: true })
+        .then(({ count }) => { 
+          if (count !== null) {
+            setTotal(count);
+            setCache(CACHE_KEYS.TOTAL_COUNT, count);
+          }
+        })
+    ]);
   }, []);
 
   // Auto-rotate featured card
@@ -175,16 +193,35 @@ export default function Index() {
   // Surprise Me: fetch one random entry by offset
   const handleSurprise = async () => {
     if (total === null || surpriseLoading) return;
+    
     setSurpriseLoading(true);
-    const randomOffset = Math.floor(Math.random() * total);
-    const { data } = await supabase
-      .from('entries')
-      .select('id')
-      .range(randomOffset, randomOffset)
-      .single();
-    if (data?.id) {
-      window.location.href = `/entries/${data.id}`;
-    } else {
+    
+    try {
+      // Try to get a random entry from cache first
+      const cachedEntries = getCache<Entry[]>(CACHE_KEYS.ENTRIES_ALL, TTL.ENTRIES_LIST);
+      
+      if (cachedEntries && cachedEntries.length > 0) {
+        // Pick a random entry from cached entries
+        const randomIndex = Math.floor(Math.random() * cachedEntries.length);
+        const randomEntry = cachedEntries[randomIndex];
+        window.location.href = `/entries/${randomEntry.id}`;
+        return;
+      }
+
+      // Fallback to Supabase if cache is empty
+      const randomOffset = Math.floor(Math.random() * total);
+      const { data } = await supabase
+        .from('entries')
+        .select('id')
+        .range(randomOffset, randomOffset)
+        .single();
+        
+      if (data?.id) {
+        window.location.href = `/entries/${data.id}`;
+      }
+    } catch (error) {
+      console.error('Surprise me failed:', error);
+    } finally {
       setSurpriseLoading(false);
     }
   };

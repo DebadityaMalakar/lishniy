@@ -48,6 +48,7 @@ export const TTL = {
 // Cache keys
 export const CACHE_KEYS = {
   ENTRIES_ALL: 'entries_all',
+  TOTAL_COUNT: 'total_count', // Add this
   ENTRY: (id: string) => `entry_${id}`,
   VOTE_HISTORY: 'vote_history',
   ACTIVE_VOTE: 'active_vote',
